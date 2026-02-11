@@ -84,6 +84,14 @@ def init_db():
             FOREIGN KEY (menu_item_id) REFERENCES menu_items(id)
         );
 
+        -- Maps stock site names (from orders) to a canonical site name
+        -- so orders and sales can be linked even when naming differs
+        CREATE TABLE IF NOT EXISTS site_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stock_name TEXT UNIQUE NOT NULL,
+            sales_name TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_orders_site_date
             ON orders(site_id, order_date);
         CREATE INDEX IF NOT EXISTS idx_sales_site_date
@@ -131,6 +139,45 @@ def get_date_range():
     end = datetime.now().date()
     start = end - timedelta(days=30)
     return start.isoformat(), end.isoformat()
+
+
+def resolve_site_name(db, raw_name):
+    """Look up the canonical site name via the alias table.
+    If an alias exists, use the sales_name. Otherwise use the raw name as-is."""
+    alias = db.execute(
+        "SELECT sales_name FROM site_aliases WHERE LOWER(stock_name) = LOWER(?)",
+        (raw_name.strip(),)
+    ).fetchone()
+    if alias:
+        return alias["sales_name"]
+    return raw_name.strip()
+
+
+def parse_order_csv(file_storage):
+    """Parse the supplier order CSV format.
+
+    This file has a date range string in the very first cell (row 0),
+    then the actual column headers on row 1, and data from row 2 onwards.
+    Columns used: Account (site), Description (product), Qty (quantity).
+    Negative quantities are kept (they net off as credits).
+    """
+    filename = file_storage.filename.lower()
+    if filename.endswith(".csv"):
+        # Read raw to grab the date range from the first row
+        import io
+        raw = file_storage.read()
+        file_storage.seek(0)
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+
+        date_range_text = lines[0].split(",")[0].strip().strip('"') if lines else ""
+
+        # Now read the actual data, skipping the first row (date range header)
+        df = pd.read_csv(io.BytesIO(raw), skiprows=1)
+    else:
+        df = pd.read_excel(file_storage, skiprows=1)
+        date_range_text = ""
+
+    return df, date_range_text
 
 
 # ---------------------------------------------------------------------------
@@ -352,55 +399,68 @@ def upload_orders():
             flash("Please upload a CSV or Excel file.", "error")
             return redirect(request.url)
 
-        site_col = request.form.get("site_col", "").strip()
-        product_col = request.form.get("product_col", "").strip()
-        quantity_col = request.form.get("quantity_col", "").strip()
-        date_col = request.form.get("date_col", "").strip()
+        # User provides the date for this file since it's in the header row
+        date_from = request.form.get("date_from", "").strip()
+        date_to = request.form.get("date_to", "").strip()
 
-        if not all([site_col, product_col, quantity_col, date_col]):
-            flash("Please fill in all column name fields.", "error")
+        if not date_from or not date_to:
+            flash("Please enter the date range this file covers.", "error")
             return redirect(request.url)
 
         try:
-            df = read_upload(file)
+            df, date_range_text = parse_order_csv(file)
         except Exception as e:
             flash(f"Error reading file: {e}", "error")
             return redirect(request.url)
 
-        # Validate columns exist
-        for col in [site_col, product_col, quantity_col, date_col]:
+        # Expected columns from the supplier format
+        site_col = "Account"
+        product_col = "Description"
+        quantity_col = "Qty"
+
+        for col in [site_col, product_col, quantity_col]:
             if col not in df.columns:
                 flash(f"Column '{col}' not found in file. Available columns: {', '.join(df.columns)}", "error")
                 return redirect(request.url)
 
+        # Use the midpoint of the date range as the order_date for all rows
+        order_date = date_from
+
         db = get_db()
         batch = datetime.now().isoformat()
         inserted = 0
+        skipped_no_alias = set()
         errors = []
 
         for idx, row in df.iterrows():
             try:
-                site_name = str(row[site_col]).strip()
+                raw_site = str(row[site_col]).strip()
                 product_name = str(row[product_col]).strip()
-                quantity = float(row[quantity_col])
-                date_val = pd.to_datetime(row[date_col]).date().isoformat()
+                qty_str = str(row[quantity_col]).strip().replace(",", "").replace(" ", "")
+                quantity = float(qty_str)
 
-                if not site_name or not product_name or site_name == "nan":
+                if not raw_site or not product_name or raw_site == "nan" or product_name == "nan":
                     continue
+
+                # Resolve site name via alias dictionary
+                site_name = resolve_site_name(db, raw_site)
 
                 site_id = get_or_create(db, "sites", site_name)
                 product_id = get_or_create(db, "stock_products", product_name)
 
                 db.execute(
                     "INSERT INTO orders (site_id, stock_product_id, quantity, order_date, upload_batch) VALUES (?, ?, ?, ?, ?)",
-                    (site_id, product_id, quantity, date_val, batch),
+                    (site_id, product_id, quantity, order_date, batch),
                 )
                 inserted += 1
             except Exception as e:
                 errors.append(f"Row {idx + 2}: {e}")
 
         db.commit()
-        flash(f"Uploaded {inserted} order records.", "success")
+
+        flash(f"Uploaded {inserted} order records for period {date_from} to {date_to}.", "success")
+        if date_range_text:
+            flash(f"Date range found in file header: {date_range_text}", "info")
         if errors:
             flash(f"{len(errors)} rows had errors. First few: {'; '.join(errors[:3])}", "warning")
         return redirect(url_for("dashboard"))
@@ -581,6 +641,114 @@ def upload_mappings():
     db.commit()
     flash(f"Uploaded {inserted} recipe mappings.", "success")
     return redirect(url_for("mappings"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Site Alias Dictionary
+# ---------------------------------------------------------------------------
+
+@app.route("/site-aliases")
+def site_aliases():
+    db = get_db()
+    aliases = db.execute(
+        "SELECT * FROM site_aliases ORDER BY stock_name"
+    ).fetchall()
+    return render_template("site_aliases.html", aliases=aliases)
+
+
+@app.route("/site-aliases/upload", methods=["POST"])
+def upload_site_aliases():
+    """Upload a CSV mapping stock site names to sales site names.
+    Expected columns: stock_name, sales_name"""
+    file = request.files.get("file")
+    if not file or not allowed_file(file.filename):
+        flash("Please upload a CSV or Excel file.", "error")
+        return redirect(url_for("site_aliases"))
+
+    try:
+        df = read_upload(file)
+    except Exception as e:
+        flash(f"Error reading file: {e}", "error")
+        return redirect(url_for("site_aliases"))
+
+    # Flexible column name matching
+    col_map = {}
+    for col in df.columns:
+        lower = col.strip().lower().replace(" ", "_")
+        if "stock" in lower:
+            col_map["stock_name"] = col
+        elif "sales" in lower:
+            col_map["sales_name"] = col
+
+    if "stock_name" not in col_map or "sales_name" not in col_map:
+        flash(
+            f"File must have a 'stock name' column and a 'sales name' column. "
+            f"Found columns: {', '.join(df.columns)}",
+            "error",
+        )
+        return redirect(url_for("site_aliases"))
+
+    db = get_db()
+    inserted = 0
+    updated = 0
+    for _, row in df.iterrows():
+        stock = str(row[col_map["stock_name"]]).strip()
+        sales = str(row[col_map["sales_name"]]).strip()
+        if not stock or stock == "nan" or not sales or sales == "nan":
+            continue
+
+        existing = db.execute(
+            "SELECT id FROM site_aliases WHERE LOWER(stock_name) = LOWER(?)",
+            (stock,),
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE site_aliases SET sales_name = ? WHERE id = ?",
+                (sales, existing["id"]),
+            )
+            updated += 1
+        else:
+            db.execute(
+                "INSERT INTO site_aliases (stock_name, sales_name) VALUES (?, ?)",
+                (stock, sales),
+            )
+            inserted += 1
+
+    db.commit()
+    flash(f"Site dictionary updated: {inserted} added, {updated} updated.", "success")
+    return redirect(url_for("site_aliases"))
+
+
+@app.route("/site-aliases/add", methods=["POST"])
+def add_site_alias():
+    stock_name = request.form.get("stock_name", "").strip()
+    sales_name = request.form.get("sales_name", "").strip()
+
+    if not stock_name or not sales_name:
+        flash("Both stock name and sales name are required.", "error")
+        return redirect(url_for("site_aliases"))
+
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO site_aliases (stock_name, sales_name) VALUES (?, ?)",
+            (stock_name, sales_name),
+        )
+        db.commit()
+        flash(f"Alias added: '{stock_name}' -> '{sales_name}'", "success")
+    except sqlite3.IntegrityError:
+        flash(f"Alias for '{stock_name}' already exists. Delete it first to update.", "warning")
+
+    return redirect(url_for("site_aliases"))
+
+
+@app.route("/site-aliases/delete/<int:alias_id>", methods=["POST"])
+def delete_site_alias(alias_id):
+    db = get_db()
+    db.execute("DELETE FROM site_aliases WHERE id = ?", (alias_id,))
+    db.commit()
+    flash("Alias deleted.", "success")
+    return redirect(url_for("site_aliases"))
 
 
 # ---------------------------------------------------------------------------

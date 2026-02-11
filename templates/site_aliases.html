@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Site Dictionary — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Site Name Dictionary</h1>
+
+<div class="card">
+    <h2>Upload Site Dictionary (CSV)</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Upload a CSV with two columns: <strong>stock_name</strong> (the name in your supplier order files)
+        and <strong>sales_name</strong> (the matching name in your sales/EPOS data).
+        This lets the system link orders to sales even when the naming is different.
+    </p>
+
+    <form method="POST" action="{{ url_for('upload_site_aliases') }}" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>File</label>
+            <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+            <div class="form-hint">CSV or Excel with stock_name and sales_name columns</div>
+        </div>
+        <button type="submit" class="btn btn-primary">Upload Dictionary</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Add Single Alias</h2>
+    <form method="POST" action="{{ url_for('add_site_alias') }}">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Stock Name (from orders)</label>
+                <input type="text" name="stock_name" placeholder="e.g. DIXY CHICKEN - 19901029" required>
+            </div>
+            <div class="form-group">
+                <label>Sales Name (from EPOS)</label>
+                <input type="text" name="sales_name" placeholder="e.g. Dixy Manchester" required>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Add Alias</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Current Aliases ({{ aliases|length }})</h2>
+    {% if aliases %}
+    <table>
+        <thead>
+            <tr>
+                <th>Stock Name (Orders)</th>
+                <th>Sales Name (EPOS)</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for alias in aliases %}
+            <tr>
+                <td>{{ alias.stock_name }}</td>
+                <td>{{ alias.sales_name }}</td>
+                <td>
+                    <form method="POST" action="{{ url_for('delete_site_alias', alias_id=alias.id) }}" style="display:inline;">
+                        <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete this alias?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <h3>No aliases yet</h3>
+        <p>Upload a dictionary CSV or add aliases manually above.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
