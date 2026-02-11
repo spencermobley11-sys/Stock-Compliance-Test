@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.db
+uploads/
+sample_orders.csv
+sample_sales.csv
+sample_mappings.csv
+.env

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Upload Sales — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Upload Sales</h1>
+
+<div class="card">
+    <h2>Upload Sales Report (CSV or Excel)</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Upload your sales/POS export. You'll need to tell us which columns contain the site name,
+        menu item name, quantity sold, and sale date.
+    </p>
+
+    <form method="POST" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>File</label>
+            <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+            <div class="form-hint">Accepted formats: CSV, XLSX, XLS</div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>Site Column Name</label>
+                <input type="text" name="site_col" placeholder="e.g. Restaurant" required>
+                <div class="form-hint">The column header for the restaurant/site name</div>
+            </div>
+
+            <div class="form-group">
+                <label>Menu Item Column Name</label>
+                <input type="text" name="item_col" placeholder="e.g. Item Name" required>
+                <div class="form-hint">The column header for the menu item sold</div>
+            </div>
+
+            <div class="form-group">
+                <label>Quantity Column Name</label>
+                <input type="text" name="quantity_col" placeholder="e.g. Qty Sold" required>
+                <div class="form-hint">The column header for the quantity sold</div>
+            </div>
+
+            <div class="form-group">
+                <label>Date Column Name</label>
+                <input type="text" name="date_col" placeholder="e.g. Sale Date" required>
+                <div class="form-hint">The column header for the sale date</div>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Upload Sales</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Expected Format</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 0.5rem;">Your file should look something like this:</p>
+    <table>
+        <thead>
+            <tr><th>Restaurant</th><th>Item Name</th><th>Qty Sold</th><th>Sale Date</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>Manchester Central</td><td>Chicken Burger</td><td>120</td><td>2025-01-15</td></tr>
+            <tr><td>Manchester Central</td><td>Classic Burger</td><td>95</td><td>2025-01-15</td></tr>
+            <tr><td>London Bridge</td><td>Chicken Burger</td><td>200</td><td>2025-01-15</td></tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}

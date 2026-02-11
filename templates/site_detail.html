@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}{{ site_name }} — Stock Compliance{% endblock %}
+
+{% block content %}
+<div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem;">
+    <a href="{{ url_for('dashboard') }}" style="color: #888; text-decoration: none;">&larr; Back</a>
+    <h1>{{ site_name }}</h1>
+</div>
+
+<p style="font-size: 0.85rem; color: #888; margin-bottom: 1rem;">
+    Data from {{ date_start }} to {{ date_end }} (rolling 30 days)
+</p>
+
+{% if not details %}
+<div class="card empty-state">
+    <h3>No data for this site</h3>
+    <p>No order or sales records found in the current 30-day window.</p>
+</div>
+{% else %}
+<div class="card">
+    <h2>Product Breakdown — Sorted by Largest Variance</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Product</th>
+                <th>Ordered</th>
+                <th>Expected Usage</th>
+                <th>Variance (units)</th>
+                <th>Variance %</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in details %}
+            <tr>
+                <td>{{ item.product }}</td>
+                <td>{{ item.ordered }}</td>
+                <td>{{ item.expected }}</td>
+                <td class="{{ 'variance-high-pos' if item.variance_pct > 30 else 'variance-med-pos' if item.variance_pct > 10 else 'variance-ok' if item.variance_pct >= -10 else 'variance-med-neg' if item.variance_pct >= -30 else 'variance-high-neg' }}">
+                    {{ item.variance }}
+                </td>
+                <td class="{{ 'variance-high-pos' if item.variance_pct > 30 else 'variance-med-pos' if item.variance_pct > 10 else 'variance-ok' if item.variance_pct >= -10 else 'variance-med-neg' if item.variance_pct >= -30 else 'variance-high-neg' }}">
+                    {{ item.variance_pct }}%
+                </td>
+                <td>
+                    {% if item.variance_pct > 30 %}
+                        <span class="badge badge-over">OVER</span>
+                    {% elif item.variance_pct < -30 %}
+                        <span class="badge badge-under">UNDER</span>
+                    {% elif item.variance_pct > 10 or item.variance_pct < -10 %}
+                        <span class="badge badge-under">REVIEW</span>
+                    {% else %}
+                        <span class="badge badge-ok">OK</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

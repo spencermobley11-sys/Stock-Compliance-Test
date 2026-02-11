@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Recipe Mappings — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Recipe Mappings</h1>
+
+<div class="card">
+    <h2>Add New Mapping</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Define how menu items map to stock ingredients. For example: "Chicken Burger" uses 1x "Chicken Breast 2kg".
+    </p>
+
+    <form method="POST" action="{{ url_for('add_mapping') }}">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Menu Item</label>
+                {% if menu_items %}
+                <input type="text" name="menu_item" list="menu-items-list" placeholder="e.g. Chicken Burger" required>
+                <datalist id="menu-items-list">
+                    {% for item in menu_items %}
+                    <option value="{{ item.name }}">
+                    {% endfor %}
+                </datalist>
+                {% else %}
+                <input type="text" name="menu_item" placeholder="e.g. Chicken Burger" required>
+                {% endif %}
+                <div class="form-hint">The menu item name (as it appears in your sales data)</div>
+            </div>
+
+            <div class="form-group">
+                <label>Stock Product</label>
+                {% if stock_products %}
+                <input type="text" name="stock_product" list="stock-products-list" placeholder="e.g. Chicken Breast 2kg" required>
+                <datalist id="stock-products-list">
+                    {% for product in stock_products %}
+                    <option value="{{ product.name }}">
+                    {% endfor %}
+                </datalist>
+                {% else %}
+                <input type="text" name="stock_product" placeholder="e.g. Chicken Breast 2kg" required>
+                {% endif %}
+                <div class="form-hint">The stock product name (as it appears in your order data)</div>
+            </div>
+
+            <div class="form-group">
+                <label>Quantity Used</label>
+                <input type="number" name="quantity_used" value="1" step="0.1" min="0.1" required>
+                <div class="form-hint">How many units of stock are used per menu item sold</div>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Add Mapping</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Bulk Upload Mappings</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Upload a CSV with columns: <strong>menu_item</strong>, <strong>stock_product</strong>, <strong>quantity_used</strong>
+    </p>
+    <form method="POST" action="{{ url_for('upload_mappings') }}" enctype="multipart/form-data" style="display: flex; gap: 1rem; align-items: end;">
+        <div class="form-group" style="flex: 1;">
+            <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Upload</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Current Mappings ({{ mappings|length }})</h2>
+    {% if not mappings %}
+    <p style="color: #888;">No mappings yet. Add one above or upload a CSV.</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr>
+                <th>Menu Item</th>
+                <th>Stock Product</th>
+                <th>Qty Used</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for mapping in mappings %}
+            <tr>
+                <td>{{ mapping.menu_item }}</td>
+                <td>{{ mapping.stock_product }}</td>
+                <td>{{ mapping.quantity_used }}</td>
+                <td>
+                    <form method="POST" action="{{ url_for('delete_mapping', mapping_id=mapping.id) }}" style="display:inline;">
+                        <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete this mapping?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

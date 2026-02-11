@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Dashboard</h1>
+
+<div class="stats">
+    <div class="stat-card">
+        <div class="label">Sites</div>
+        <div class="value">{{ total_sites }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Order Records (30d)</div>
+        <div class="value">{{ total_orders }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Sales Records (30d)</div>
+        <div class="value">{{ total_sales }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Recipe Mappings</div>
+        <div class="value">{{ total_mappings }}</div>
+    </div>
+</div>
+
+<p style="font-size: 0.85rem; color: #888; margin-bottom: 1rem;">
+    Showing data from {{ date_start }} to {{ date_end }} (rolling 30 days)
+</p>
+
+{% if not sites %}
+<div class="card empty-state">
+    <h3>No data yet</h3>
+    <p>Upload your orders and sales CSVs, then set up recipe mappings to see compliance data.</p>
+    <div style="margin-top: 1rem; display: flex; gap: 1rem; justify-content: center;">
+        <a href="{{ url_for('upload_orders') }}" class="btn btn-primary">Upload Orders</a>
+        <a href="{{ url_for('upload_sales') }}" class="btn btn-primary">Upload Sales</a>
+        <a href="{{ url_for('mappings') }}" class="btn btn-primary">Recipe Mappings</a>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <h2>All Sites — Sorted by Largest Variance</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Site</th>
+                <th>Total Ordered</th>
+                <th>Total Expected</th>
+                <th>Overall Variance</th>
+                <th>Overall Variance %</th>
+                <th>Worst Product Variance</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for site in sites %}
+            <tr>
+                <td><a class="site-link" href="{{ url_for('site_detail', site_name=site.name) }}">{{ site.name }}</a></td>
+                <td>{{ site.total_ordered }}</td>
+                <td>{{ site.total_expected }}</td>
+                <td class="{{ 'variance-high-pos' if site.overall_variance_pct > 30 else 'variance-med-pos' if site.overall_variance_pct > 10 else 'variance-ok' if site.overall_variance_pct >= -10 else 'variance-med-neg' if site.overall_variance_pct >= -30 else 'variance-high-neg' }}">
+                    {{ site.overall_variance }}
+                </td>
+                <td class="{{ 'variance-high-pos' if site.overall_variance_pct > 30 else 'variance-med-pos' if site.overall_variance_pct > 10 else 'variance-ok' if site.overall_variance_pct >= -10 else 'variance-med-neg' if site.overall_variance_pct >= -30 else 'variance-high-neg' }}">
+                    {{ site.overall_variance_pct }}%
+                </td>
+                <td>{{ site.worst_product_variance_pct }}%</td>
+                <td>
+                    {% if site.overall_variance_pct > 30 %}
+                        <span class="badge badge-over">OVER</span>
+                    {% elif site.overall_variance_pct < -30 %}
+                        <span class="badge badge-under">UNDER</span>
+                    {% elif site.overall_variance_pct > 10 or site.overall_variance_pct < -10 %}
+                        <span class="badge badge-under">REVIEW</span>
+                    {% else %}
+                        <span class="badge badge-ok">OK</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}

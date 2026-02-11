@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Upload Orders — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Upload Orders</h1>
+
+<div class="card">
+    <h2>Upload Order Report (CSV or Excel)</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Upload your supplier order report. You'll need to tell us which columns contain the site name,
+        product name, quantity ordered, and order date.
+    </p>
+
+    <form method="POST" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>File</label>
+            <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+            <div class="form-hint">Accepted formats: CSV, XLSX, XLS</div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>Site Column Name</label>
+                <input type="text" name="site_col" placeholder="e.g. Restaurant" required>
+                <div class="form-hint">The column header for the restaurant/site name</div>
+            </div>
+
+            <div class="form-group">
+                <label>Product Column Name</label>
+                <input type="text" name="product_col" placeholder="e.g. Product" required>
+                <div class="form-hint">The column header for the stock product ordered</div>
+            </div>
+
+            <div class="form-group">
+                <label>Quantity Column Name</label>
+                <input type="text" name="quantity_col" placeholder="e.g. Qty" required>
+                <div class="form-hint">The column header for the quantity ordered</div>
+            </div>
+
+            <div class="form-group">
+                <label>Date Column Name</label>
+                <input type="text" name="date_col" placeholder="e.g. Order Date" required>
+                <div class="form-hint">The column header for the order date</div>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Upload Orders</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Expected Format</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 0.5rem;">Your file should look something like this:</p>
+    <table>
+        <thead>
+            <tr><th>Restaurant</th><th>Product</th><th>Qty</th><th>Order Date</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>Manchester Central</td><td>Chicken Breast 2kg</td><td>15</td><td>2025-01-15</td></tr>
+            <tr><td>Manchester Central</td><td>Burger Buns (pack 12)</td><td>20</td><td>2025-01-15</td></tr>
+            <tr><td>London Bridge</td><td>Chicken Breast 2kg</td><td>25</td><td>2025-01-15</td></tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}

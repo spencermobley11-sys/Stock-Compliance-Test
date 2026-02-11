@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Data Management — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Data Management</h1>
+
+<div class="card">
+    <h2>Order Upload Batches</h2>
+    {% if not order_batches %}
+    <p style="color: #888;">No order data uploaded yet.</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr><th>Uploaded At</th><th>Records</th><th>Date Range</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for batch in order_batches %}
+            <tr>
+                <td>{{ batch.upload_batch[:19] }}</td>
+                <td>{{ batch.record_count }}</td>
+                <td>{{ batch.date_from }} to {{ batch.date_to }}</td>
+                <td>
+                    <form method="POST" action="{{ url_for('delete_batch') }}" style="display:inline;">
+                        <input type="hidden" name="batch" value="{{ batch.upload_batch }}">
+                        <input type="hidden" name="type" value="orders">
+                        <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete this batch?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Sales Upload Batches</h2>
+    {% if not sales_batches %}
+    <p style="color: #888;">No sales data uploaded yet.</p>
+    {% else %}
+    <table>
+        <thead>
+            <tr><th>Uploaded At</th><th>Records</th><th>Date Range</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for batch in sales_batches %}
+            <tr>
+                <td>{{ batch.upload_batch[:19] }}</td>
+                <td>{{ batch.record_count }}</td>
+                <td>{{ batch.date_from }} to {{ batch.date_to }}</td>
+                <td>
+                    <form method="POST" action="{{ url_for('delete_batch') }}" style="display:inline;">
+                        <input type="hidden" name="batch" value="{{ batch.upload_batch }}">
+                        <input type="hidden" name="type" value="sales">
+                        <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete this batch?')">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,635 @@
+import os
+import sqlite3
+from datetime import datetime, timedelta
+from flask import (
+    Flask, render_template, request, redirect, url_for, flash, g, jsonify
+)
+import pandas as pd
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-in-production")
+
+DATABASE = os.path.join(app.root_path, "stock_compliance.db")
+UPLOAD_FOLDER = os.path.join(app.root_path, "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DATABASE)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA journal_mode=WAL")
+        g.db.execute("PRAGMA foreign_keys=ON")
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exception):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    db = get_db()
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS sites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS menu_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            menu_item_id INTEGER NOT NULL,
+            stock_product_id INTEGER NOT NULL,
+            quantity_used REAL NOT NULL DEFAULT 1.0,
+            FOREIGN KEY (menu_item_id) REFERENCES menu_items(id),
+            FOREIGN KEY (stock_product_id) REFERENCES stock_products(id),
+            UNIQUE(menu_item_id, stock_product_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL,
+            stock_product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            order_date DATE NOT NULL,
+            upload_batch TEXT,
+            FOREIGN KEY (site_id) REFERENCES sites(id),
+            FOREIGN KEY (stock_product_id) REFERENCES stock_products(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL,
+            menu_item_id INTEGER NOT NULL,
+            quantity_sold REAL NOT NULL,
+            sale_date DATE NOT NULL,
+            upload_batch TEXT,
+            FOREIGN KEY (site_id) REFERENCES sites(id),
+            FOREIGN KEY (menu_item_id) REFERENCES menu_items(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orders_site_date
+            ON orders(site_id, order_date);
+        CREATE INDEX IF NOT EXISTS idx_sales_site_date
+            ON sales(site_id, sale_date);
+    """)
+    db.commit()
+
+
+with app.app_context():
+    init_db()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in {"csv", "xlsx", "xls"}
+
+
+def read_upload(file_storage):
+    """Read an uploaded CSV or Excel file into a pandas DataFrame."""
+    filename = file_storage.filename.lower()
+    if filename.endswith(".csv"):
+        return pd.read_csv(file_storage)
+    else:
+        return pd.read_excel(file_storage)
+
+
+def get_or_create(db, table, name_value):
+    """Get ID for a name in a lookup table, creating it if it doesn't exist."""
+    row = db.execute(
+        f"SELECT id FROM {table} WHERE LOWER(name) = LOWER(?)", (name_value.strip(),)
+    ).fetchone()
+    if row:
+        return row["id"]
+    cursor = db.execute(
+        f"INSERT INTO {table} (name) VALUES (?)", (name_value.strip(),)
+    )
+    return cursor.lastrowid
+
+
+def get_date_range():
+    """Return the 30-day rolling window (start, end) based on today."""
+    end = datetime.now().date()
+    start = end - timedelta(days=30)
+    return start.isoformat(), end.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Routes — Dashboard
+# ---------------------------------------------------------------------------
+
+@app.route("/")
+def dashboard():
+    db = get_db()
+    date_start, date_end = get_date_range()
+
+    # Per-site, per-product: total ordered
+    ordered = db.execute("""
+        SELECT s.name AS site, sp.name AS product,
+               SUM(o.quantity) AS total_ordered
+        FROM orders o
+        JOIN sites s ON o.site_id = s.id
+        JOIN stock_products sp ON o.stock_product_id = sp.id
+        WHERE o.order_date BETWEEN ? AND ?
+        GROUP BY o.site_id, o.stock_product_id
+    """, (date_start, date_end)).fetchall()
+
+    # Per-site, per-stock-product: expected usage via recipe mapping
+    expected = db.execute("""
+        SELECT s.name AS site, sp.name AS product,
+               SUM(sa.quantity_sold * rm.quantity_used) AS expected_usage
+        FROM sales sa
+        JOIN sites s ON sa.site_id = s.id
+        JOIN recipe_mappings rm ON sa.menu_item_id = rm.menu_item_id
+        JOIN stock_products sp ON rm.stock_product_id = sp.id
+        WHERE sa.sale_date BETWEEN ? AND ?
+        GROUP BY sa.site_id, rm.stock_product_id
+    """, (date_start, date_end)).fetchall()
+
+    # Build lookup: (site, product) -> {ordered, expected, variance}
+    data = {}
+    for row in ordered:
+        key = (row["site"], row["product"])
+        data[key] = {"ordered": row["total_ordered"], "expected": 0}
+
+    for row in expected:
+        key = (row["site"], row["product"])
+        if key in data:
+            data[key]["expected"] = row["expected_usage"]
+        else:
+            data[key] = {"ordered": 0, "expected": row["expected_usage"]}
+
+    # Calculate variances and build site summaries
+    site_summaries = {}
+    product_details = {}
+
+    for (site, product), vals in data.items():
+        ordered_qty = vals["ordered"]
+        expected_qty = vals["expected"]
+        variance = ordered_qty - expected_qty
+        if expected_qty > 0:
+            variance_pct = (variance / expected_qty) * 100
+        elif ordered_qty > 0:
+            variance_pct = 100.0
+        else:
+            variance_pct = 0.0
+
+        # Accumulate site-level summary (sum of absolute variances)
+        if site not in site_summaries:
+            site_summaries[site] = {
+                "total_ordered": 0,
+                "total_expected": 0,
+                "product_count": 0,
+                "worst_variance_pct": 0,
+            }
+        summary = site_summaries[site]
+        summary["total_ordered"] += ordered_qty
+        summary["total_expected"] += expected_qty
+        summary["product_count"] += 1
+        if abs(variance_pct) > abs(summary["worst_variance_pct"]):
+            summary["worst_variance_pct"] = variance_pct
+
+        # Product-level detail for drill-down
+        if site not in product_details:
+            product_details[site] = []
+        product_details[site].append({
+            "product": product,
+            "ordered": round(ordered_qty, 1),
+            "expected": round(expected_qty, 1),
+            "variance": round(variance, 1),
+            "variance_pct": round(variance_pct, 1),
+        })
+
+    # Build sorted site list
+    sites_list = []
+    for site, summary in site_summaries.items():
+        total_ord = summary["total_ordered"]
+        total_exp = summary["total_expected"]
+        overall_var = total_ord - total_exp
+        if total_exp > 0:
+            overall_var_pct = (overall_var / total_exp) * 100
+        elif total_ord > 0:
+            overall_var_pct = 100.0
+        else:
+            overall_var_pct = 0.0
+
+        sites_list.append({
+            "name": site,
+            "total_ordered": round(total_ord, 1),
+            "total_expected": round(total_exp, 1),
+            "overall_variance": round(overall_var, 1),
+            "overall_variance_pct": round(overall_var_pct, 1),
+            "worst_product_variance_pct": round(summary["worst_variance_pct"], 1),
+            "product_count": summary["product_count"],
+        })
+
+    # Sort by absolute worst product variance (biggest outliers first)
+    sites_list.sort(key=lambda x: abs(x["worst_product_variance_pct"]), reverse=True)
+
+    # Count totals for the header
+    total_sites = db.execute("SELECT COUNT(*) as c FROM sites").fetchone()["c"]
+    total_orders = db.execute(
+        "SELECT COUNT(*) as c FROM orders WHERE order_date BETWEEN ? AND ?",
+        (date_start, date_end)
+    ).fetchone()["c"]
+    total_sales = db.execute(
+        "SELECT COUNT(*) as c FROM sales WHERE sale_date BETWEEN ? AND ?",
+        (date_start, date_end)
+    ).fetchone()["c"]
+    total_mappings = db.execute("SELECT COUNT(*) as c FROM recipe_mappings").fetchone()["c"]
+
+    return render_template(
+        "dashboard.html",
+        sites=sites_list,
+        product_details=product_details,
+        date_start=date_start,
+        date_end=date_end,
+        total_sites=total_sites,
+        total_orders=total_orders,
+        total_sales=total_sales,
+        total_mappings=total_mappings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Site drill-down
+# ---------------------------------------------------------------------------
+
+@app.route("/site/<site_name>")
+def site_detail(site_name):
+    db = get_db()
+    date_start, date_end = get_date_range()
+
+    site = db.execute("SELECT * FROM sites WHERE name = ?", (site_name,)).fetchone()
+    if not site:
+        flash(f"Site '{site_name}' not found.", "error")
+        return redirect(url_for("dashboard"))
+
+    ordered = db.execute("""
+        SELECT sp.name AS product, SUM(o.quantity) AS total_ordered
+        FROM orders o
+        JOIN stock_products sp ON o.stock_product_id = sp.id
+        WHERE o.site_id = ? AND o.order_date BETWEEN ? AND ?
+        GROUP BY o.stock_product_id
+    """, (site["id"], date_start, date_end)).fetchall()
+
+    expected = db.execute("""
+        SELECT sp.name AS product,
+               SUM(sa.quantity_sold * rm.quantity_used) AS expected_usage
+        FROM sales sa
+        JOIN recipe_mappings rm ON sa.menu_item_id = rm.menu_item_id
+        JOIN stock_products sp ON rm.stock_product_id = sp.id
+        WHERE sa.site_id = ? AND sa.sale_date BETWEEN ? AND ?
+        GROUP BY rm.stock_product_id
+    """, (site["id"], date_start, date_end)).fetchall()
+
+    # Merge
+    products = {}
+    for row in ordered:
+        products[row["product"]] = {"ordered": row["total_ordered"], "expected": 0}
+    for row in expected:
+        if row["product"] in products:
+            products[row["product"]]["expected"] = row["expected_usage"]
+        else:
+            products[row["product"]] = {"ordered": 0, "expected": row["expected_usage"]}
+
+    details = []
+    for product, vals in products.items():
+        variance = vals["ordered"] - vals["expected"]
+        if vals["expected"] > 0:
+            variance_pct = (variance / vals["expected"]) * 100
+        elif vals["ordered"] > 0:
+            variance_pct = 100.0
+        else:
+            variance_pct = 0.0
+        details.append({
+            "product": product,
+            "ordered": round(vals["ordered"], 1),
+            "expected": round(vals["expected"], 1),
+            "variance": round(variance, 1),
+            "variance_pct": round(variance_pct, 1),
+        })
+
+    details.sort(key=lambda x: abs(x["variance_pct"]), reverse=True)
+
+    return render_template(
+        "site_detail.html",
+        site_name=site_name,
+        details=details,
+        date_start=date_start,
+        date_end=date_end,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Upload Orders
+# ---------------------------------------------------------------------------
+
+@app.route("/upload/orders", methods=["GET", "POST"])
+def upload_orders():
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or not allowed_file(file.filename):
+            flash("Please upload a CSV or Excel file.", "error")
+            return redirect(request.url)
+
+        site_col = request.form.get("site_col", "").strip()
+        product_col = request.form.get("product_col", "").strip()
+        quantity_col = request.form.get("quantity_col", "").strip()
+        date_col = request.form.get("date_col", "").strip()
+
+        if not all([site_col, product_col, quantity_col, date_col]):
+            flash("Please fill in all column name fields.", "error")
+            return redirect(request.url)
+
+        try:
+            df = read_upload(file)
+        except Exception as e:
+            flash(f"Error reading file: {e}", "error")
+            return redirect(request.url)
+
+        # Validate columns exist
+        for col in [site_col, product_col, quantity_col, date_col]:
+            if col not in df.columns:
+                flash(f"Column '{col}' not found in file. Available columns: {', '.join(df.columns)}", "error")
+                return redirect(request.url)
+
+        db = get_db()
+        batch = datetime.now().isoformat()
+        inserted = 0
+        errors = []
+
+        for idx, row in df.iterrows():
+            try:
+                site_name = str(row[site_col]).strip()
+                product_name = str(row[product_col]).strip()
+                quantity = float(row[quantity_col])
+                date_val = pd.to_datetime(row[date_col]).date().isoformat()
+
+                if not site_name or not product_name or site_name == "nan":
+                    continue
+
+                site_id = get_or_create(db, "sites", site_name)
+                product_id = get_or_create(db, "stock_products", product_name)
+
+                db.execute(
+                    "INSERT INTO orders (site_id, stock_product_id, quantity, order_date, upload_batch) VALUES (?, ?, ?, ?, ?)",
+                    (site_id, product_id, quantity, date_val, batch),
+                )
+                inserted += 1
+            except Exception as e:
+                errors.append(f"Row {idx + 2}: {e}")
+
+        db.commit()
+        flash(f"Uploaded {inserted} order records.", "success")
+        if errors:
+            flash(f"{len(errors)} rows had errors. First few: {'; '.join(errors[:3])}", "warning")
+        return redirect(url_for("dashboard"))
+
+    return render_template("upload_orders.html")
+
+
+# ---------------------------------------------------------------------------
+# Routes — Upload Sales
+# ---------------------------------------------------------------------------
+
+@app.route("/upload/sales", methods=["GET", "POST"])
+def upload_sales():
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or not allowed_file(file.filename):
+            flash("Please upload a CSV or Excel file.", "error")
+            return redirect(request.url)
+
+        site_col = request.form.get("site_col", "").strip()
+        item_col = request.form.get("item_col", "").strip()
+        quantity_col = request.form.get("quantity_col", "").strip()
+        date_col = request.form.get("date_col", "").strip()
+
+        if not all([site_col, item_col, quantity_col, date_col]):
+            flash("Please fill in all column name fields.", "error")
+            return redirect(request.url)
+
+        try:
+            df = read_upload(file)
+        except Exception as e:
+            flash(f"Error reading file: {e}", "error")
+            return redirect(request.url)
+
+        for col in [site_col, item_col, quantity_col, date_col]:
+            if col not in df.columns:
+                flash(f"Column '{col}' not found in file. Available columns: {', '.join(df.columns)}", "error")
+                return redirect(request.url)
+
+        db = get_db()
+        batch = datetime.now().isoformat()
+        inserted = 0
+        errors = []
+
+        for idx, row in df.iterrows():
+            try:
+                site_name = str(row[site_col]).strip()
+                item_name = str(row[item_col]).strip()
+                quantity = float(row[quantity_col])
+                date_val = pd.to_datetime(row[date_col]).date().isoformat()
+
+                if not site_name or not item_name or site_name == "nan":
+                    continue
+
+                site_id = get_or_create(db, "sites", site_name)
+                item_id = get_or_create(db, "menu_items", item_name)
+
+                db.execute(
+                    "INSERT INTO sales (site_id, menu_item_id, quantity_sold, sale_date, upload_batch) VALUES (?, ?, ?, ?, ?)",
+                    (site_id, item_id, quantity, date_val, batch),
+                )
+                inserted += 1
+            except Exception as e:
+                errors.append(f"Row {idx + 2}: {e}")
+
+        db.commit()
+        flash(f"Uploaded {inserted} sales records.", "success")
+        if errors:
+            flash(f"{len(errors)} rows had errors. First few: {'; '.join(errors[:3])}", "warning")
+        return redirect(url_for("dashboard"))
+
+    return render_template("upload_sales.html")
+
+
+# ---------------------------------------------------------------------------
+# Routes — Recipe Mappings
+# ---------------------------------------------------------------------------
+
+@app.route("/mappings")
+def mappings():
+    db = get_db()
+    rows = db.execute("""
+        SELECT rm.id, mi.name AS menu_item, sp.name AS stock_product,
+               rm.quantity_used
+        FROM recipe_mappings rm
+        JOIN menu_items mi ON rm.menu_item_id = mi.id
+        JOIN stock_products sp ON rm.stock_product_id = sp.id
+        ORDER BY mi.name, sp.name
+    """).fetchall()
+
+    menu_items = db.execute("SELECT * FROM menu_items ORDER BY name").fetchall()
+    stock_products = db.execute("SELECT * FROM stock_products ORDER BY name").fetchall()
+
+    return render_template(
+        "mappings.html",
+        mappings=rows,
+        menu_items=menu_items,
+        stock_products=stock_products,
+    )
+
+
+@app.route("/mappings/add", methods=["POST"])
+def add_mapping():
+    db = get_db()
+    menu_item_name = request.form.get("menu_item", "").strip()
+    stock_product_name = request.form.get("stock_product", "").strip()
+    quantity_used = request.form.get("quantity_used", "1")
+
+    if not menu_item_name or not stock_product_name:
+        flash("Both menu item and stock product are required.", "error")
+        return redirect(url_for("mappings"))
+
+    try:
+        quantity_used = float(quantity_used)
+    except ValueError:
+        flash("Quantity must be a number.", "error")
+        return redirect(url_for("mappings"))
+
+    menu_item_id = get_or_create(db, "menu_items", menu_item_name)
+    stock_product_id = get_or_create(db, "stock_products", stock_product_name)
+
+    try:
+        db.execute(
+            "INSERT INTO recipe_mappings (menu_item_id, stock_product_id, quantity_used) VALUES (?, ?, ?)",
+            (menu_item_id, stock_product_id, quantity_used),
+        )
+        db.commit()
+        flash(f"Mapping added: {menu_item_name} uses {quantity_used}x {stock_product_name}", "success")
+    except sqlite3.IntegrityError:
+        flash(f"Mapping already exists for {menu_item_name} -> {stock_product_name}. Delete it first to update.", "warning")
+
+    return redirect(url_for("mappings"))
+
+
+@app.route("/mappings/delete/<int:mapping_id>", methods=["POST"])
+def delete_mapping(mapping_id):
+    db = get_db()
+    db.execute("DELETE FROM recipe_mappings WHERE id = ?", (mapping_id,))
+    db.commit()
+    flash("Mapping deleted.", "success")
+    return redirect(url_for("mappings"))
+
+
+@app.route("/mappings/upload", methods=["POST"])
+def upload_mappings():
+    """Bulk upload recipe mappings from CSV. Columns: menu_item, stock_product, quantity_used"""
+    file = request.files.get("file")
+    if not file or not allowed_file(file.filename):
+        flash("Please upload a CSV or Excel file.", "error")
+        return redirect(url_for("mappings"))
+
+    try:
+        df = read_upload(file)
+    except Exception as e:
+        flash(f"Error reading file: {e}", "error")
+        return redirect(url_for("mappings"))
+
+    required = {"menu_item", "stock_product", "quantity_used"}
+    if not required.issubset(set(df.columns)):
+        flash(f"File must have columns: menu_item, stock_product, quantity_used. Found: {', '.join(df.columns)}", "error")
+        return redirect(url_for("mappings"))
+
+    db = get_db()
+    inserted = 0
+    for _, row in df.iterrows():
+        try:
+            mi_id = get_or_create(db, "menu_items", str(row["menu_item"]).strip())
+            sp_id = get_or_create(db, "stock_products", str(row["stock_product"]).strip())
+            qty = float(row["quantity_used"])
+            db.execute(
+                "INSERT OR REPLACE INTO recipe_mappings (menu_item_id, stock_product_id, quantity_used) VALUES (?, ?, ?)",
+                (mi_id, sp_id, qty),
+            )
+            inserted += 1
+        except Exception:
+            continue
+
+    db.commit()
+    flash(f"Uploaded {inserted} recipe mappings.", "success")
+    return redirect(url_for("mappings"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Data Management
+# ---------------------------------------------------------------------------
+
+@app.route("/data")
+def data_management():
+    db = get_db()
+    order_batches = db.execute("""
+        SELECT upload_batch, COUNT(*) as record_count,
+               MIN(order_date) as date_from, MAX(order_date) as date_to
+        FROM orders
+        WHERE upload_batch IS NOT NULL
+        GROUP BY upload_batch
+        ORDER BY upload_batch DESC
+    """).fetchall()
+
+    sales_batches = db.execute("""
+        SELECT upload_batch, COUNT(*) as record_count,
+               MIN(sale_date) as date_from, MAX(sale_date) as date_to
+        FROM sales
+        WHERE upload_batch IS NOT NULL
+        GROUP BY upload_batch
+        ORDER BY upload_batch DESC
+    """).fetchall()
+
+    return render_template("data.html", order_batches=order_batches, sales_batches=sales_batches)
+
+
+@app.route("/data/delete-batch", methods=["POST"])
+def delete_batch():
+    batch = request.form.get("batch")
+    data_type = request.form.get("type")
+
+    db = get_db()
+    if data_type == "orders":
+        db.execute("DELETE FROM orders WHERE upload_batch = ?", (batch,))
+    elif data_type == "sales":
+        db.execute("DELETE FROM sales WHERE upload_batch = ?", (batch,))
+    db.commit()
+
+    flash(f"Deleted {data_type} batch.", "success")
+    return redirect(url_for("data_management"))
+
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
