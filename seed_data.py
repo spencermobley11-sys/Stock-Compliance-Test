@@ -204,7 +204,8 @@ def seed():
             # Uses sweet potato fries, not a tracked stock item currently
         },
         "Loaded Gyros Fries": {
-            # Fries + toppings - needs clarification on which protein
+            "Halal Chicken Gyros Flakes": 0.04,
+            # Also uses fries + sauce but those aren't tracked stock
         },
         "Pita with Tzatziki": {
             "Choriatiki Pitta Bread": 1,
@@ -228,16 +229,6 @@ def seed():
         # --- Desserts ---
         "Vegan Salted Caramel Chocolate Brownie": {
             "Vegan Salted Caramel Brownie": 1,
-        },
-
-        # --- Desserts ---
-        "Vegan Belgian Chocolate Fudge Cake": {
-            # Not in COGS sheet - needs stock product if tracked
-        },
-
-        # --- Other mains ---
-        "Moussaka": {
-            # From COGS: £2.66 COGS - needs recipe breakdown
         },
 
         # --- Modifiers (extras) ---
