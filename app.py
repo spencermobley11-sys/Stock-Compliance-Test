@@ -8,6 +8,7 @@ import pandas as pd
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-in-production")
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload limit
 
 DATABASE = os.path.join(app.root_path, "stock_compliance.db")
 UPLOAD_FOLDER = os.path.join(app.root_path, "uploads")
@@ -125,7 +126,7 @@ def read_upload(file_storage):
     """Read an uploaded CSV or Excel file into a pandas DataFrame."""
     filename = file_storage.filename.lower()
     if filename.endswith(".csv"):
-        return pd.read_csv(file_storage)
+        return pd.read_csv(file_storage, low_memory=False)
     else:
         return pd.read_excel(file_storage)
 
@@ -490,7 +491,7 @@ def upload_orders():
                 qty_str = str(row[quantity_col]).strip().replace(",", "").replace(" ", "")
                 quantity = float(qty_str)
 
-                if not raw_site or not product_name or raw_site == "nan" or product_name == "nan":
+                if pd.isna(row[site_col]) or pd.isna(row[product_col]) or not raw_site or not product_name:
                     continue
 
                 # Resolve site name via alias dictionary
@@ -560,6 +561,7 @@ def upload_deliveroo():
         inserted = 0
         skipped = 0
         unmatched = set()
+        errors = []
 
         for idx, row in df.iterrows():
             try:
@@ -567,7 +569,7 @@ def upload_deliveroo():
                 raw_item = str(row["Item name"]).strip()
                 quantity = float(row["Quantity"])
 
-                if not raw_site or raw_site == "nan" or not raw_item or raw_item == "nan":
+                if pd.isna(row["Restaurant name"]) or pd.isna(row["Item name"]) or not raw_site or not raw_item:
                     continue
 
                 # Skip items with no stock impact
@@ -610,12 +612,18 @@ def upload_deliveroo():
                     (site_id, mi_row["id"], quantity, date_from, batch),
                 )
                 inserted += 1
+
+                # Batch commit every 500 rows to avoid large transactions
+                if inserted % 500 == 0:
+                    db.commit()
             except Exception as e:
-                continue
+                errors.append(f"Row {idx + 2}: {e}")
 
         db.commit()
 
         flash(f"Deliveroo: imported {inserted} stock-relevant sales records. {skipped} skipped (no stock impact).", "success")
+        if errors:
+            flash(f"{len(errors)} rows had errors. First few: {'; '.join(errors[:5])}", "warning")
         if unmatched:
             sorted_unmatched = sorted(unmatched)
             flash(
@@ -672,7 +680,7 @@ def upload_sales():
                 quantity = float(row[quantity_col])
                 date_val = pd.to_datetime(row[date_col]).date().isoformat()
 
-                if not site_name or not item_name or site_name == "nan":
+                if pd.isna(row[site_col]) or pd.isna(row[item_col]) or not site_name or not item_name:
                     continue
 
                 site_id = get_or_create(db, "sites", site_name)
