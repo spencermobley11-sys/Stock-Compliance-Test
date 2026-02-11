@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Menu Item Aliases — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Menu Item Aliases</h1>
+
+<div class="card">
+    <h2>Add Alias</h2>
+    <form method="POST" action="{{ url_for('add_menu_alias') }}">
+        <div class="form-row">
+            <div class="form-group">
+                <label>Platform</label>
+                <select name="platform">
+                    <option value="deliveroo">Deliveroo</option>
+                    <option value="uber_eats">Uber Eats</option>
+                    <option value="just_eat">Just Eat</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Platform Item Name</label>
+                <input type="text" name="platform_item_name" placeholder="e.g. Chicken Gyros Box" required>
+            </div>
+            <div class="form-group">
+                <label>Canonical Recipe Name</label>
+                <input type="text" name="canonical_menu_item" placeholder="e.g. Halal Chicken Gyros Box" required>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Add Alias</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Current Aliases ({{ aliases|length }})</h2>
+    {% if aliases %}
+    <table>
+        <thead>
+            <tr>
+                <th>Platform</th>
+                <th>Platform Item Name</th>
+                <th>Canonical Recipe Name</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for alias in aliases %}
+            <tr>
+                <td>{{ alias.platform }}</td>
+                <td>{{ alias.platform_item_name }}</td>
+                <td>{{ alias.canonical_menu_item }}</td>
+                <td>
+                    <form method="POST" action="{{ url_for('delete_menu_alias', alias_id=alias.id) }}" style="display:inline;">
+                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color: #888;">No aliases yet. Run the seed script or add them manually.</p>
+    {% endif %}
+</div>
+{% endblock %}

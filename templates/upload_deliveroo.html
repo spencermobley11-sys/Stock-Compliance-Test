@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Upload Deliveroo Sales — Stock Compliance{% endblock %}
+
+{% block content %}
+<h1 style="margin-bottom: 1.5rem;">Upload Deliveroo Sales</h1>
+
+<div class="card">
+    <h2>Upload Deliveroo Sales Report</h2>
+    <p style="font-size: 0.9rem; color: #666; margin-bottom: 1rem;">
+        Upload your Deliveroo sales CSV. Expected columns:
+        <strong>Restaurant name</strong>, <strong>Category</strong>,
+        <strong>Item name</strong>, <strong>Quantity</strong>, <strong>Price</strong>, <strong>Subtotal</strong>.
+    </p>
+    <p style="font-size: 0.85rem; color: #888; margin-bottom: 1rem;">
+        Items are automatically matched to recipes using the item alias dictionary.
+        Zero-stock items (sauce choices, removals, drink selections in meal deals) are skipped.
+        Unmatched items will be flagged so you can add aliases.
+    </p>
+
+    <form method="POST" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>File</label>
+            <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
+            <div class="form-hint">Accepted formats: CSV, XLSX, XLS</div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>Period Start Date</label>
+                <input type="date" name="date_from" required>
+            </div>
+            <div class="form-group">
+                <label>Period End Date</label>
+                <input type="date" name="date_to" required>
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Upload Deliveroo Sales</button>
+    </form>
+</div>
+{% endblock %}

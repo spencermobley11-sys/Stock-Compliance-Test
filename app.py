@@ -92,6 +92,15 @@ def init_db():
             sales_name TEXT NOT NULL
         );
 
+        -- Maps platform-specific menu item names to canonical recipe names
+        CREATE TABLE IF NOT EXISTS menu_item_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            platform_item_name TEXT NOT NULL,
+            canonical_menu_item TEXT NOT NULL,
+            UNIQUE(platform, platform_item_name)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_orders_site_date
             ON orders(site_id, order_date);
         CREATE INDEX IF NOT EXISTS idx_sales_site_date
@@ -151,6 +160,48 @@ def resolve_site_name(db, raw_name):
     if alias:
         return alias["sales_name"]
     return raw_name.strip()
+
+
+def resolve_menu_item_name(db, platform, raw_name):
+    """Look up the canonical menu item name via the alias table.
+    Returns the canonical name if found, otherwise returns the raw name."""
+    alias = db.execute(
+        "SELECT canonical_menu_item FROM menu_item_aliases "
+        "WHERE LOWER(platform) = LOWER(?) AND LOWER(platform_item_name) = LOWER(?)",
+        (platform.strip(), raw_name.strip())
+    ).fetchone()
+    if alias:
+        return alias["canonical_menu_item"]
+    return raw_name.strip()
+
+
+def resolve_site_from_platform(db, raw_name):
+    """Resolve a platform site name (e.g. 'Athenian - Evesham') to canonical.
+    Uses the site_aliases table. Falls back to raw name."""
+    alias = db.execute(
+        "SELECT sales_name FROM site_aliases WHERE LOWER(stock_name) = LOWER(?)",
+        (raw_name.strip(),)
+    ).fetchone()
+    if alias:
+        return alias["sales_name"]
+    return raw_name.strip()
+
+
+# Items that should be skipped entirely during sales import (no stock impact)
+SKIP_ITEMS = {
+    # Sauce choices within items (£0 modifiers - not separate sauce pots)
+    "tzatziki (dairy)", "gyros sauce", "gyros sauce (vegan)",
+    "athenian sauce (vegan)", "chilli mayo (vegan)", "chili mayo (vegan)",
+    "truffle mayo (vegan)", "no sauce",
+    # Removals
+    "remove tomatoes", "remove onions", "remove lettuce", "remove fries",
+    # Drink choices within meal deals (£0 modifiers)
+    "coca-cola", "coca cola zero", "coke zero", "diet coke",
+    "sprite", "fanta", "fanta orange", "sparkling water", "still water",
+    # Meal deal wrapper lines (components are tracked via modifiers)
+    "gyros meal for 1 \U0001f929", "gyros meal for 2 \U0001f46f\u200d\u2640\ufe0f",
+    "super combo for 4 \U0001f9d1\u200d\U0001f9d1\u200d\U0001f9d2\u200d\U0001f9d2",
+}
 
 
 def parse_order_csv(file_storage):
@@ -469,7 +520,116 @@ def upload_orders():
 
 
 # ---------------------------------------------------------------------------
-# Routes — Upload Sales
+# Routes — Upload Deliveroo Sales
+# ---------------------------------------------------------------------------
+
+@app.route("/upload/deliveroo", methods=["GET", "POST"])
+def upload_deliveroo():
+    """Upload Deliveroo sales CSV.
+    Expected columns: Restaurant name, Category, Item name, Quantity, Price, Subtotal
+    """
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or not allowed_file(file.filename):
+            flash("Please upload a CSV or Excel file.", "error")
+            return redirect(request.url)
+
+        date_from = request.form.get("date_from", "").strip()
+        date_to = request.form.get("date_to", "").strip()
+        if not date_from or not date_to:
+            flash("Please enter the date range this sales file covers.", "error")
+            return redirect(request.url)
+
+        try:
+            df = read_upload(file)
+        except Exception as e:
+            flash(f"Error reading file: {e}", "error")
+            return redirect(request.url)
+
+        # Validate columns
+        required_cols = {"Restaurant name", "Item name", "Quantity"}
+        if not required_cols.issubset(set(df.columns)):
+            flash(
+                f"Missing columns. Need: {required_cols}. Found: {', '.join(df.columns)}",
+                "error",
+            )
+            return redirect(request.url)
+
+        db = get_db()
+        batch = datetime.now().isoformat()
+        inserted = 0
+        skipped = 0
+        unmatched = set()
+
+        for idx, row in df.iterrows():
+            try:
+                raw_site = str(row["Restaurant name"]).strip()
+                raw_item = str(row["Item name"]).strip()
+                quantity = float(row["Quantity"])
+
+                if not raw_site or raw_site == "nan" or not raw_item or raw_item == "nan":
+                    continue
+
+                # Skip items with no stock impact
+                if raw_item.lower() in SKIP_ITEMS:
+                    skipped += 1
+                    continue
+
+                # Resolve site name
+                site_name = resolve_site_from_platform(db, raw_site)
+
+                # Resolve menu item name via alias
+                canonical_item = resolve_menu_item_name(db, "deliveroo", raw_item)
+
+                # Check if this canonical item has any recipe mappings
+                mi_row = db.execute(
+                    "SELECT id FROM menu_items WHERE LOWER(name) = LOWER(?)",
+                    (canonical_item,)
+                ).fetchone()
+
+                if not mi_row:
+                    unmatched.add(raw_item)
+                    skipped += 1
+                    continue
+
+                has_recipe = db.execute(
+                    "SELECT 1 FROM recipe_mappings WHERE menu_item_id = ?",
+                    (mi_row["id"],)
+                ).fetchone()
+
+                if not has_recipe:
+                    # Item exists but no recipe = no stock impact (e.g. oregano fries)
+                    skipped += 1
+                    continue
+
+                site_id = get_or_create(db, "sites", site_name)
+
+                db.execute(
+                    "INSERT INTO sales (site_id, menu_item_id, quantity_sold, sale_date, upload_batch) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (site_id, mi_row["id"], quantity, date_from, batch),
+                )
+                inserted += 1
+            except Exception as e:
+                continue
+
+        db.commit()
+
+        flash(f"Deliveroo: imported {inserted} stock-relevant sales records. {skipped} skipped (no stock impact).", "success")
+        if unmatched:
+            sorted_unmatched = sorted(unmatched)
+            flash(
+                f"Unmatched items (need aliases): {', '.join(sorted_unmatched[:15])}"
+                + (f" ... and {len(sorted_unmatched) - 15} more" if len(sorted_unmatched) > 15 else ""),
+                "warning",
+            )
+        return redirect(url_for("dashboard"))
+
+    return render_template("upload_deliveroo.html")
+
+
+# ---------------------------------------------------------------------------
+# Routes — Upload Sales (generic)
 # ---------------------------------------------------------------------------
 
 @app.route("/upload/sales", methods=["GET", "POST"])
@@ -749,6 +909,53 @@ def delete_site_alias(alias_id):
     db.commit()
     flash("Alias deleted.", "success")
     return redirect(url_for("site_aliases"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Menu Item Aliases
+# ---------------------------------------------------------------------------
+
+@app.route("/menu-aliases")
+def menu_aliases():
+    db = get_db()
+    aliases = db.execute(
+        "SELECT * FROM menu_item_aliases ORDER BY platform, platform_item_name"
+    ).fetchall()
+    return render_template("menu_aliases.html", aliases=aliases)
+
+
+@app.route("/menu-aliases/add", methods=["POST"])
+def add_menu_alias():
+    platform = request.form.get("platform", "").strip()
+    platform_item = request.form.get("platform_item_name", "").strip()
+    canonical = request.form.get("canonical_menu_item", "").strip()
+
+    if not all([platform, platform_item, canonical]):
+        flash("All fields are required.", "error")
+        return redirect(url_for("menu_aliases"))
+
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT OR REPLACE INTO menu_item_aliases (platform, platform_item_name, canonical_menu_item) "
+            "VALUES (?, ?, ?)",
+            (platform, platform_item, canonical),
+        )
+        db.commit()
+        flash(f"Alias added: [{platform}] '{platform_item}' -> '{canonical}'", "success")
+    except Exception as e:
+        flash(f"Error: {e}", "error")
+
+    return redirect(url_for("menu_aliases"))
+
+
+@app.route("/menu-aliases/delete/<int:alias_id>", methods=["POST"])
+def delete_menu_alias(alias_id):
+    db = get_db()
+    db.execute("DELETE FROM menu_item_aliases WHERE id = ?", (alias_id,))
+    db.commit()
+    flash("Alias deleted.", "success")
+    return redirect(url_for("menu_aliases"))
 
 
 # ---------------------------------------------------------------------------
